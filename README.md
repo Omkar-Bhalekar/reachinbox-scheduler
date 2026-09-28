@@ -853,4 +853,4 @@ GitHub: https://github.com/Omkar-Bhalekar/reachinbox-scheduler
 ## Author
 
 **Omkar Bhalekar**
-Software Development Intern Assignment — ReachInbox.ai
+
