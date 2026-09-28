@@ -1,30 +1,46 @@
 "use client";
 
+import { Suspense, useEffect, useState, useCallback } from "react";
 import { useSession, signOut } from "next-auth/react";
-import { useEffect, useState, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
+
 import ComposeModal from "@/components/ComposeModal";
-import Table from "@/components/ui/Table";
-import EmptyState from "@/components/ui/EmptyState";
-import Spinner from "@/components/ui/Spinner";
-import Button from "@/components/ui/Button";
+import DashboardLayout from "@/components/layout/DashboardLayout";
+import Sidebar from "@/components/layout/Sidebar";
+import EmailRow from "@/components/email/EmailRow";
+
 import { apiClient } from "@/lib/apiClient";
 import type { EmailRecord } from "@/types/api";
 
-export default function DashboardPage() {
+function DashboardContent() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
 
-  const [activeTab, setActiveTab] = useState<"scheduled" | "sent">(
-    "scheduled",
-  );
-  const [isComposeOpen, setIsComposeOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<
+    "scheduled" | "sent"
+  >("scheduled");
+
+  const [isComposeOpen, setIsComposeOpen] =
+    useState(false);
+
   const [rows, setRows] = useState<EmailRecord[]>([]);
+
   const [loading, setLoading] = useState(true);
 
-  const [slackConnected, setSlackConnected] = useState(false);
-  const [slackTeamName, setSlackTeamName] = useState<string | null>(null);
-  const [slackLoading, setSlackLoading] = useState(true);
+  const [searchQuery, setSearchQuery] =
+    useState("");
+
+  const [searching, setSearching] =
+    useState(false);
+
+  const [slackConnected, setSlackConnected] =
+    useState(false);
+
+  const [slackTeamName, setSlackTeamName] =
+    useState<string | null>(null);
+
+  const [slackLoading, setSlackLoading] =
+    useState(true);
 
   const fetchEmails = useCallback(async () => {
     setLoading(true);
@@ -36,43 +52,138 @@ export default function DashboardPage() {
           : "SENT";
 
       const res = await apiClient.get(
-        `/api/emails?status=${encodeURIComponent(status)}`,
+        `/api/emails?status=${encodeURIComponent(
+          status,
+        )}`,
       );
 
       setRows(res.data.items);
-    } catch {
+    } catch (error) {
+      console.error(
+        "Failed to fetch emails:",
+        error,
+      );
+
       setRows([]);
     } finally {
       setLoading(false);
     }
   }, [activeTab]);
 
-  const fetchSlackStatus = useCallback(async () => {
-    setSlackLoading(true);
+  const searchEmails = useCallback(
+    async (query: string) => {
+      const trimmedQuery = query.trim();
 
-    try {
-      const res = await apiClient.get("/api/auth/whoami");
+      if (!trimmedQuery) {
+        await fetchEmails();
+        return;
+      }
 
-      setSlackConnected(Boolean(res.data.user.slackConnected));
-      setSlackTeamName(res.data.user.slackTeamName || null);
-    } catch {
-      setSlackConnected(false);
-      setSlackTeamName(null);
-    } finally {
-      setSlackLoading(false);
-    }
-  }, []);
+      setSearching(true);
+
+      try {
+        const res = await apiClient.get(
+          `/api/emails/search?q=${encodeURIComponent(
+            trimmedQuery,
+          )}`,
+        );
+
+        let results: EmailRecord[] =
+          res.data.items || [];
+
+        if (activeTab === "scheduled") {
+          results = results.filter((email) =>
+            [
+              "SCHEDULED",
+              "PROCESSING",
+              "RATE_LIMITED",
+            ].includes(email.status),
+          );
+        } else {
+          results = results.filter(
+            (email) => email.status === "SENT",
+          );
+        }
+
+        setRows(results);
+      } catch (error) {
+        console.error(
+          "Email search failed:",
+          error,
+        );
+
+        setRows([]);
+      } finally {
+        setSearching(false);
+      }
+    },
+    [activeTab, fetchEmails],
+  );
+
+  const fetchSlackStatus = useCallback(
+    async () => {
+      setSlackLoading(true);
+
+      try {
+        const res = await apiClient.get(
+          "/api/auth/whoami",
+        );
+
+        setSlackConnected(
+          Boolean(
+            res.data.user.slackConnected,
+          ),
+        );
+
+        setSlackTeamName(
+          res.data.user.slackTeamName ||
+            null,
+        );
+      } catch (error) {
+        console.error(
+          "Failed to fetch Slack status:",
+          error,
+        );
+
+        setSlackConnected(false);
+        setSlackTeamName(null);
+      } finally {
+        setSlackLoading(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     fetchEmails();
   }, [fetchEmails]);
 
   useEffect(() => {
+    const tab = searchParams.get("tab");
+
+    if (
+      tab === "scheduled" ||
+      tab === "sent"
+    ) {
+      setActiveTab(tab);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      searchEmails(searchQuery);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, searchEmails]);
+
+  useEffect(() => {
     fetchSlackStatus();
   }, [fetchSlackStatus]);
 
   useEffect(() => {
-    const slackStatus = searchParams.get("slack");
+    const slackStatus =
+      searchParams.get("slack");
 
     if (slackStatus === "connected") {
       fetchSlackStatus();
@@ -83,17 +194,26 @@ export default function DashboardPage() {
         "/dashboard",
       );
     }
-  }, [searchParams, fetchSlackStatus]);
+  }, [
+    searchParams,
+    fetchSlackStatus,
+  ]);
 
   const connectSlack = async () => {
     try {
       setSlackLoading(true);
 
-      const res = await apiClient.post("/api/auth/slack/connect");
+      const res = await apiClient.post(
+        "/api/auth/slack/connect",
+      );
 
-      window.location.href = res.data.authorizeUrl;
+      window.location.href =
+        res.data.authorizeUrl;
     } catch (error: any) {
-      console.error("Slack connect failed:", error);
+      console.error(
+        "Slack connect failed:",
+        error,
+      );
 
       alert(
         error?.response?.data?.error ||
@@ -114,12 +234,17 @@ export default function DashboardPage() {
     try {
       setSlackLoading(true);
 
-      await apiClient.post("/api/auth/slack/disconnect");
+      await apiClient.post(
+        "/api/auth/slack/disconnect",
+      );
 
       setSlackConnected(false);
       setSlackTeamName(null);
     } catch (error: any) {
-      console.error("Slack disconnect failed:", error);
+      console.error(
+        "Slack disconnect failed:",
+        error,
+      );
 
       alert(
         error?.response?.data?.error ||
@@ -130,187 +255,170 @@ export default function DashboardPage() {
     }
   };
 
+  const handleTabChange = (
+    tab: "scheduled" | "sent",
+  ) => {
+    setActiveTab(tab);
+    setSearchQuery("");
+  };
+
   return (
-    <div className="min-h-screen bg-gray-100">
-      <header className="bg-white shadow">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-gray-900">
-            ReachInbox Scheduler
-          </h1>
+    <DashboardLayout
+      sidebar={
+        <Sidebar
+          session={session}
+          activeTab={activeTab}
+          onTabChange={handleTabChange}
+          onCompose={() =>
+            setIsComposeOpen(true)
+          }
+          slackConnected={slackConnected}
+          slackTeamName={slackTeamName}
+          slackLoading={slackLoading}
+          onConnectSlack={connectSlack}
+          onDisconnectSlack={
+            disconnectSlack
+          }
+          onLogout={() =>
+            signOut({
+              callbackUrl: "/",
+            })
+          }
+        />
+      }
+    >
+      <div className="flex h-full flex-col">
+        <header className="flex h-[72px] shrink-0 items-center justify-between border-b border-[#E8E8E8] bg-white px-8">
+          <div>
+            <h1 className="text-xl font-semibold tracking-[-0.02em] text-[#171717]">
+              {activeTab === "scheduled"
+                ? "Scheduled"
+                : "Sent"}
+            </h1>
 
-          <div className="flex items-center gap-4">
-            {!slackLoading &&
-              (slackConnected ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-green-700">
-                    Slack
-                    {slackTeamName
-                      ? `: ${slackTeamName}`
-                      : " connected"}
-                  </span>
+            <p className="mt-0.5 text-xs text-[#8A8A8A]">
+              {activeTab === "scheduled"
+                ? "Emails waiting to be sent"
+                : "Emails that have been sent"}
+            </p>
+          </div>
 
-                  <Button
-                    variant="secondary"
-                    onClick={disconnectSlack}
-                  >
-                    Disconnect
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  variant="secondary"
-                  onClick={connectSlack}
-                >
-                  Connect Slack
-                </Button>
-              ))}
+          {/* Only functional action kept: Refresh */}
+          <button
+            type="button"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E5E5E5] bg-white text-[#666666] transition hover:bg-[#F7F7F7]"
+            title="Refresh"
+            onClick={() => {
+              setSearchQuery("");
+              fetchEmails();
+            }}
+          >
+            ↻
+          </button>
+        </header>
 
-            {session?.user?.image && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={session.user.image}
-                alt=""
-                className="h-8 w-8 rounded-full"
+        <section className="min-h-0 flex-1 overflow-auto bg-[#F7F7F8] px-8 py-6">
+          <div className="mb-5">
+            <div className="flex h-11 items-center rounded-lg border border-[#E5E5E5] bg-white px-4 shadow-sm">
+              <span className="mr-3 w-4 text-[#999999]">
+                {searching ? "…" : "⌕"}
+              </span>
+
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(event) =>
+                  setSearchQuery(
+                    event.target.value,
+                  )
+                }
+                placeholder="Search emails..."
+                className="w-full bg-transparent text-sm text-[#333333] outline-none placeholder:text-[#A5A5A5]"
               />
-            )}
 
-            <div className="text-sm text-right">
-              <p className="font-medium text-gray-900">
-                {session?.user?.name}
-              </p>
-
-              <p className="text-gray-500">
-                {session?.user?.email}
-              </p>
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSearchQuery("")
+                  }
+                  className="ml-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-sm text-[#999999] hover:bg-[#F2F2F2] hover:text-[#555555]"
+                  title="Clear search"
+                >
+                  ×
+                </button>
+              )}
             </div>
-
-            <Button
-              variant="danger"
-              onClick={() => signOut({ callbackUrl: "/" })}
-            >
-              Logout
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="flex justify-between items-center mb-6">
-          <div className="flex space-x-2">
-            <button
-              onClick={() => setActiveTab("scheduled")}
-              className={`px-4 py-2 rounded-md text-sm font-medium ${
-                activeTab === "scheduled"
-                  ? "bg-blue-100 text-blue-700"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              Scheduled Emails
-            </button>
-
-            <button
-              onClick={() => setActiveTab("sent")}
-              className={`px-4 py-2 rounded-md text-sm font-medium ${
-                activeTab === "sent"
-                  ? "bg-blue-100 text-blue-700"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              Sent Emails
-            </button>
           </div>
 
-          <Button onClick={() => setIsComposeOpen(true)}>
-            + Compose New Email
-          </Button>
-        </div>
+          <div className="overflow-hidden rounded-xl border border-[#E7E7E7] bg-white">
+            {loading || searching ? (
+              <div className="flex h-64 items-center justify-center text-sm text-[#888888]">
+                {searching
+                  ? "Searching emails..."
+                  : "Loading emails..."}
+              </div>
+            ) : rows.length === 0 ? (
+              <div className="flex h-64 flex-col items-center justify-center">
+                <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-[#F2F2F2] text-xl">
+                  ✉
+                </div>
 
-        <div className="bg-white shadow rounded-lg overflow-hidden">
-          {loading ? (
-            <Spinner />
-          ) : rows.length === 0 ? (
-            <EmptyState message={`No ${activeTab} emails yet.`} />
-          ) : activeTab === "scheduled" ? (
-            <Table<EmailRecord>
-              rows={rows}
-              columns={[
-                {
-                  header: "Email",
-                  render: (r) => r.to,
-                },
-                {
-                  header: "Subject",
-                  render: (r) => r.subject,
-                },
-                {
-                  header: "Scheduled time",
-                  render: (r) =>
-                    new Date(r.scheduledAt).toLocaleString(),
-                },
-                {
-                  header: "Status",
-                  render: (r) => (
-                    <StatusBadge status={r.status} />
-                  ),
-                },
-              ]}
-            />
-          ) : (
-            <Table<EmailRecord>
-              rows={rows}
-              columns={[
-                {
-                  header: "Email",
-                  render: (r) => r.to,
-                },
-                {
-                  header: "Subject",
-                  render: (r) => r.subject,
-                },
-                {
-                  header: "Sent time",
-                  render: (r) =>
-                    r.sentAt
-                      ? new Date(r.sentAt).toLocaleString()
-                      : "—",
-                },
-                {
-                  header: "Status",
-                  render: (r) => (
-                    <StatusBadge status={r.status} />
-                  ),
-                },
-              ]}
-            />
-          )}
-        </div>
-      </main>
+                <p className="text-sm font-medium text-[#444444]">
+                  {searchQuery
+                    ? "No matching emails"
+                    : `No ${activeTab} emails yet`}
+                </p>
+
+                <p className="mt-1 text-xs text-[#999999]">
+                  {searchQuery
+                    ? "Try a different search term."
+                    : "Your emails will appear here."}
+                </p>
+              </div>
+            ) : (
+              <div>
+                {rows.map((row) => (
+                  <EmailRow
+                    key={row.id}
+                    email={row}
+                    activeTab={activeTab}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
 
       <ComposeModal
         isOpen={isComposeOpen}
-        onClose={() => setIsComposeOpen(false)}
-        onScheduled={fetchEmails}
+        onClose={() =>
+          setIsComposeOpen(false)
+        }
+        onScheduled={() => {
+          setSearchQuery("");
+          fetchEmails();
+        }}
       />
+    </DashboardLayout>
+  );
+}
+
+function DashboardPageFallback() {
+  return (
+    <div className="flex h-screen items-center justify-center bg-[#F7F7F8]">
+      <div className="text-sm text-[#777777]">
+        Loading dashboard...
+      </div>
     </div>
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    SENT: "bg-green-100 text-green-700",
-    FAILED: "bg-red-100 text-red-700",
-    SCHEDULED: "bg-blue-100 text-blue-700",
-    PROCESSING: "bg-yellow-100 text-yellow-700",
-    RATE_LIMITED: "bg-orange-100 text-orange-700",
-  };
-
+export default function DashboardPage() {
   return (
-    <span
-      className={`px-2 py-1 rounded-full text-xs font-medium ${
-        colors[status] || "bg-gray-100 text-gray-700"
-      }`}
-    >
-      {status}
-    </span>
+    <Suspense fallback={<DashboardPageFallback />}>
+      <DashboardContent />
+    </Suspense>
   );
 }

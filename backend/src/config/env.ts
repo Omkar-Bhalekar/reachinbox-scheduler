@@ -9,6 +9,7 @@ function num(val: string | undefined, fallback: number) {
 export const config = {
   port: num(process.env.PORT, 4000),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
+  authJwtSecret: process.env.AUTH_JWT_SECRET || '',
   backendUrl: process.env.BACKEND_URL || 'http://localhost:4000',
   elastic: {
     node: process.env.ELASTICSEARCH_URL || 'http://localhost:9200',

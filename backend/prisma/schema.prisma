@@ -6,13 +6,13 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
-
 model User {
   id               String   @id @default(cuid())
-  googleId         String   @unique
+  googleId         String?  @unique
   email            String   @unique
   name             String
   avatar           String?
+  passwordHash     String?
   slackAccessToken String?
   slackWebhookUrl  String?
   slackTeamName    String?
@@ -22,7 +22,6 @@ model User {
 
   @@map("users")
 }
-
 model Email {
   id                 String      @id @default(cuid())
   userId             String
