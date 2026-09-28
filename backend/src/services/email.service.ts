@@ -132,26 +132,39 @@ export class EmailService {
     }
   }
 
-  // Run on boot. Re-attaches any DB row that lost its BullMQ job (e.g. Redis
-  // data was wiped, or the process crashed between the DB write and the
-  // queue.add call) so scheduled emails still fire after a restart.
-  static async reconcileOnBoot() {
-    const orphaned = await prisma.email.findMany({
-      where: { status: { in: ['SCHEDULED', 'PROCESSING'] } },
-    });
+  // Run on boot. Re-attach SCHEDULED rows that lost their BullMQ job
+// so scheduled emails still fire after a restart.
+// PROCESSING rows are intentionally not requeued automatically because
+// the SMTP side effect may already have occurred before a crash.
+ static async reconcileOnBoot() {
+  const orphaned = await prisma.email.findMany({
+    where: {
+      status: 'SCHEDULED',
+    },
+  });
 
-    let requeued = 0;
-    for (const email of orphaned) {
-      const existingJob = await emailQueue.getJob(email.jobId || email.id);
-      if (!existingJob) {
-        await this.enqueue(
-          email.id,
-          { userId: email.userId, senderEmail: email.senderEmail, to: email.to, subject: email.subject, body: email.body },
-          email.scheduledAt,
-        );
-        requeued++;
-      }
+  let requeued = 0;
+
+  for (const email of orphaned) {
+    const existingJob = await emailQueue.getJob(email.jobId || email.id);
+
+    if (!existingJob) {
+      await this.enqueue(
+        email.id,
+        {
+          userId: email.userId,
+          senderEmail: email.senderEmail,
+          to: email.to,
+          subject: email.subject,
+          body: email.body,
+        },
+        email.scheduledAt,
+      );
+
+      requeued++;
     }
-    return requeued;
   }
+
+  return requeued;
+}
 }
