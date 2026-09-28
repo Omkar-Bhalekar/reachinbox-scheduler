@@ -1,21 +1,28 @@
 import { Worker, Job } from 'bullmq';
 import nodemailer from 'nodemailer';
-import { redisConnection, rateLimitRedis } from '../config/redis';
+import {
+  redisConnection,
+  rateLimitRedis,
+} from '../config/redis';
 import { config } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { SlackService } from '../services/slack.service';
 import { EmailService } from '../services/email.service';
 import { emailQueue } from '../queues/email.queue';
 
-// Lazily create (and cache) a transporter. If no Ethereal credentials are
-// configured, auto-provision a throwaway Ethereal test account on first use,
-// exactly like nodemailer.createTestAccount() is meant for.
+// Lazily create and cache a transporter.
+//
+// If explicit Ethereal credentials are configured, they are used.
+// Otherwise Nodemailer creates a temporary Ethereal account.
 let transporterPromise: Promise<nodemailer.Transporter> | null = null;
 
 function getTransporter() {
   if (!transporterPromise) {
     transporterPromise = (async () => {
-      if (config.smtp.auth.user && config.smtp.auth.pass) {
+      if (
+        config.smtp.auth.user &&
+        config.smtp.auth.pass
+      ) {
         return nodemailer.createTransport({
           host: config.smtp.host,
           port: config.smtp.port,
@@ -26,7 +33,8 @@ function getTransporter() {
         });
       }
 
-      const testAccount = await nodemailer.createTestAccount();
+      const testAccount =
+        await nodemailer.createTestAccount();
 
       console.log(
         `Auto-provisioned Ethereal account: ${testAccount.user}`,
@@ -47,9 +55,18 @@ function getTransporter() {
   return transporterPromise;
 }
 
-async function getHourlyLimit(senderEmail: string) {
-  const override = await rateLimitRedis.get(`senderlimit:${senderEmail}`);
-  const n = parseInt(override || '', 10);
+async function getHourlyLimit(
+  senderEmail: string,
+) {
+  const override =
+    await rateLimitRedis.get(
+      `senderlimit:${senderEmail}`,
+    );
+
+  const n = parseInt(
+    override || '',
+    10,
+  );
 
   return Number.isFinite(n) && n > 0
     ? n
@@ -69,31 +86,118 @@ export const emailWorker = new Worker(
       userId,
     } = job.data;
 
-    // ─────────────────────────────────────────────────────────────
-    // HOURLY RATE LIMIT
-    // ─────────────────────────────────────────────────────────────
+    /*
+     * ============================================================
+     * IDEMPOTENCY / DATABASE CLAIM
+     * ============================================================
+     *
+     * The database is the source of truth for whether an email
+     * attempt is allowed to proceed.
+     *
+     * We check BOTH:
+     *
+     * 1. The email status
+     * 2. The BullMQ job ID currently stored in PostgreSQL
+     *
+     * The second check is important because a rate-limited email
+     * can have an old/stale retry job in Redis.
+     *
+     * Example:
+     *
+     * DB:
+     *   jobId = email123:retry:ABC
+     *
+     * Redis:
+     *   email123:retry:ABC  <- valid
+     *   email123:retry:XYZ  <- stale duplicate
+     *
+     * Only ABC is allowed to process the email.
+     */
+    const claimed =
+      await prisma.email.updateMany({
+        where: {
+          id: emailId,
 
-    // Redis INCR is atomic and therefore safe across multiple workers
-    // or multiple backend processes.
-    const currentHour = new Date().toISOString().slice(0, 13);
+          status: {
+            in: [
+              'SCHEDULED',
+              'FAILED',
+              'RATE_LIMITED',
+            ],
+          },
+
+          OR: [
+            // A newly scheduled email may not have its BullMQ
+            // job ID persisted yet because the worker can start
+            // immediately after emailQueue.add().
+            {
+              status: 'SCHEDULED',
+              jobId: null,
+            },
+
+            // Once PostgreSQL has a job ID, only that exact
+            // BullMQ job is allowed to process the email.
+            {
+              jobId: String(job.id),
+            },
+          ],
+        },
+
+        data: {
+          status: 'PROCESSING',
+        },
+      });
+
+    /*
+     * ============================================================
+     * HOURLY RATE LIMIT
+     * ============================================================
+     *
+     * This happens AFTER the DB claim.
+     *
+     * Therefore duplicate/stale BullMQ jobs cannot consume
+     * hourly rate-limit capacity.
+     *
+     * Redis INCR is atomic and therefore safe across multiple
+     * worker processes.
+     */
+    const currentHour =
+      new Date()
+        .toISOString()
+        .slice(0, 13);
 
     const rateLimitKey =
       `rate-limit:${senderEmail}:${currentHour}`;
 
-    const limit = await getHourlyLimit(senderEmail);
+    const limit =
+      await getHourlyLimit(senderEmail);
 
     const currentCount =
-      await rateLimitRedis.incr(rateLimitKey);
+      await rateLimitRedis.incr(
+        rateLimitKey,
+      );
 
     if (currentCount === 1) {
-      await rateLimitRedis.expire(rateLimitKey, 3600);
+      await rateLimitRedis.expire(
+        rateLimitKey,
+        3600,
+      );
     }
 
     if (currentCount > limit) {
-      // This email has NOT been sent, so give the rate-limit slot back.
-      await rateLimitRedis.decr(rateLimitKey);
+      /*
+       * This email has NOT been sent.
+       *
+       * Give the rate-limit slot back because this email
+       * did not consume an actual send slot.
+       */
+      await rateLimitRedis.decr(
+        rateLimitKey,
+      );
 
-      // Schedule for the beginning of the next hour.
+      /*
+       * Schedule at the beginning of the next hour.
+       */
       const nextHour = new Date();
 
       nextHour.setHours(
@@ -104,16 +208,27 @@ export const emailWorker = new Worker(
       );
 
       const delay =
-        nextHour.getTime() - Date.now();
+        nextHour.getTime() -
+        Date.now();
 
+      /*
+       * Mark the email as waiting for the next
+       * available rate-limit window.
+       */
       await prisma.email.update({
-        where: { id: emailId },
+        where: {
+          id: emailId,
+        },
+
         data: {
           status: 'RATE_LIMITED',
+          scheduledAt: nextHour,
         },
       });
 
-      // Only one Slack notification per sender per hour.
+      /*
+       * Only one Slack notification per sender/hour.
+       */
       const notifKey =
         `slacknotif:${senderEmail}:${currentHour}`;
 
@@ -136,108 +251,118 @@ export const emailWorker = new Worker(
         );
       }
 
-      // Re-enqueue the email for the next hour.
-      //
-      // We use a new job ID because the original BullMQ job
-      // is currently completing.
-      await emailQueue.add(
-        'send-email',
-        job.data,
-        {
-          jobId: `${emailId}:retry:${Date.now()}`,
-          delay,
+      /*
+       * Create the delayed retry job.
+       *
+       * The email ID is included in the job ID so that every
+       * retry is uniquely identifiable.
+       */
+      const retryJob =
+        await emailQueue.add(
+          'send-email',
+          job.data,
+          {
+            jobId:
+              `${emailId}:retry:${Date.now()}`,
+            delay,
+          },
+        );
+
+      /*
+       * IMPORTANT:
+       *
+       * PostgreSQL must point to the exact retry job that
+       * was just created.
+       *
+       * This allows restart reconciliation and idempotency
+       * checks to distinguish the valid retry from stale
+       * duplicate jobs.
+       */
+      await prisma.email.update({
+        where: {
+          id: emailId,
         },
-      );
+
+        data: {
+          jobId: String(retryJob.id),
+          scheduledAt: nextHour,
+          status: 'RATE_LIMITED',
+        },
+      });
 
       return;
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // IDEMPOTENCY / DATABASE CLAIM
-    // ─────────────────────────────────────────────────────────────
 
     /*
-     * Only these states can start a send:
-     *
-     * SCHEDULED    -> first attempt
-     * FAILED       -> BullMQ retry after an SMTP failure
-     * RATE_LIMITED -> retry after the next hour
-     *
-     * PROCESSING is intentionally excluded.
-     *
-     * This prevents a stale/replayed job from sending the same email
-     * again while another worker/process may already be processing it.
-     *
-     * SENT is also excluded, so an already-sent email cannot be sent
-     * again by a duplicate BullMQ job.
+     * ============================================================
+     * SEND EMAIL
+     * ============================================================
      */
-    const claimed = await prisma.email.updateMany({
-      where: {
-        id: emailId,
-        status: {
-          in: [
-            'SCHEDULED',
-            'FAILED',
-            'RATE_LIMITED',
-          ],
-        },
-      },
-      data: {
-        status: 'PROCESSING',
-      },
-    });
-
-    if (claimed.count === 0) {
-      // The email is either already SENT or currently PROCESSING.
-      // Do not send it again.
-      return;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // SEND EMAIL
-    // ─────────────────────────────────────────────────────────────
 
     try {
-      const transporter = await getTransporter();
+      const transporter =
+        await getTransporter();
 
-      const info = await transporter.sendMail({
-        from: senderEmail,
-        to,
-        subject,
-        text: body,
-        html: body,
-      });
+      const info =
+        await transporter.sendMail({
+          from: senderEmail,
+          to,
+          subject,
+          text: body,
+          html: body,
+        });
 
       const previewUrl =
-        nodemailer.getTestMessageUrl(info);
+        nodemailer.getTestMessageUrl(
+          info,
+        );
 
-      // SMTP send succeeded. Persist SENT state.
-      const updated = await prisma.email.update({
-        where: { id: emailId },
-        data: {
-          status: 'SENT',
-          sentAt: new Date(),
-          etherealPreviewUrl: previewUrl
-            ? String(previewUrl)
-            : undefined,
-        },
-      });
+      /*
+       * SMTP send succeeded.
+       */
+      const updated =
+        await prisma.email.update({
+          where: {
+            id: emailId,
+          },
 
-      await EmailService.indexToSearch(updated);
+          data: {
+            status: 'SENT',
+            sentAt: new Date(),
+
+            etherealPreviewUrl:
+              previewUrl
+                ? String(previewUrl)
+                : undefined,
+          },
+        });
+
+      await EmailService.indexToSearch(
+        updated,
+      );
     } catch (error: any) {
-      // SMTP failed, so mark the email as FAILED.
-      const updated = await prisma.email.update({
-        where: { id: emailId },
-        data: {
-          status: 'FAILED',
-          error: error.message,
-        },
-      });
+      /*
+       * SMTP failed.
+       *
+       * Mark the email as FAILED and let BullMQ's
+       * configured retry/backoff mechanism retry it.
+       */
+      const updated =
+        await prisma.email.update({
+          where: {
+            id: emailId,
+          },
 
-      await EmailService.indexToSearch(updated);
+          data: {
+            status: 'FAILED',
+            error: error.message,
+          },
+        });
 
-      // Allow BullMQ's configured retry/backoff mechanism
-      // to retry the failed job.
+      await EmailService.indexToSearch(
+        updated,
+      );
+
       throw error;
     }
   },
@@ -245,14 +370,18 @@ export const emailWorker = new Worker(
   {
     connection: redisConnection,
 
-    // Configurable worker concurrency.
+    /*
+     * Configurable worker concurrency.
+     */
     concurrency:
       config.rateLimit.workerConcurrency,
 
-    // Minimum spacing between sends.
-    //
-    // BullMQ enforces this worker-wide and prevents sends from
-    // happening faster than the configured interval.
+    /*
+     * Minimum spacing between sends.
+     *
+     * BullMQ ensures only one job is allowed through
+     * this limiter during the configured duration.
+     */
     limiter: {
       max: 1,
       duration:
@@ -261,10 +390,12 @@ export const emailWorker = new Worker(
   },
 );
 
-// Log failed BullMQ jobs.
-emailWorker.on('failed', (job, err) => {
-  console.error(
-    `Job ${job?.id} failed:`,
-    err.message,
-  );
-});
+emailWorker.on(
+  'failed',
+  (job, err) => {
+    console.error(
+      `Job ${job?.id} failed:`,
+      err.message,
+    );
+  },
+);
