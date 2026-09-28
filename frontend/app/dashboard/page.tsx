@@ -2,6 +2,7 @@
 
 import { useSession, signOut } from "next-auth/react";
 import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import ComposeModal from "@/components/ComposeModal";
 import Table from "@/components/ui/Table";
 import EmptyState from "@/components/ui/EmptyState";
@@ -10,18 +11,20 @@ import Button from "@/components/ui/Button";
 import { apiClient } from "@/lib/apiClient";
 import type { EmailRecord } from "@/types/api";
 
-const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
-
 export default function DashboardPage() {
   const { data: session } = useSession();
+  const searchParams = useSearchParams();
+
   const [activeTab, setActiveTab] = useState<"scheduled" | "sent">(
     "scheduled",
   );
   const [isComposeOpen, setIsComposeOpen] = useState(false);
   const [rows, setRows] = useState<EmailRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [slackConnectUrl, setSlackConnectUrl] = useState<string | null>(null);
+
+  const [slackConnected, setSlackConnected] = useState(false);
+  const [slackTeamName, setSlackTeamName] = useState<string | null>(null);
+  const [slackLoading, setSlackLoading] = useState(true);
 
   const fetchEmails = useCallback(async () => {
     setLoading(true);
@@ -44,20 +47,88 @@ export default function DashboardPage() {
     }
   }, [activeTab]);
 
+  const fetchSlackStatus = useCallback(async () => {
+    setSlackLoading(true);
+
+    try {
+      const res = await apiClient.get("/api/auth/whoami");
+
+      setSlackConnected(Boolean(res.data.user.slackConnected));
+      setSlackTeamName(res.data.user.slackTeamName || null);
+    } catch {
+      setSlackConnected(false);
+      setSlackTeamName(null);
+    } finally {
+      setSlackLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchEmails();
   }, [fetchEmails]);
 
   useEffect(() => {
-    apiClient
-      .get("/api/auth/whoami")
-      .then((res) =>
-        setSlackConnectUrl(
-          `${BACKEND_URL}/api/auth/slack/connect?uid=${res.data.user.id}`,
-        ),
-      )
-      .catch(() => {});
-  }, []);
+    fetchSlackStatus();
+  }, [fetchSlackStatus]);
+
+  useEffect(() => {
+    const slackStatus = searchParams.get("slack");
+
+    if (slackStatus === "connected") {
+      fetchSlackStatus();
+
+      window.history.replaceState(
+        {},
+        "",
+        "/dashboard",
+      );
+    }
+  }, [searchParams, fetchSlackStatus]);
+
+  const connectSlack = async () => {
+    try {
+      setSlackLoading(true);
+
+      const res = await apiClient.post("/api/auth/slack/connect");
+
+      window.location.href = res.data.authorizeUrl;
+    } catch (error: any) {
+      console.error("Slack connect failed:", error);
+
+      alert(
+        error?.response?.data?.error ||
+          "Unable to connect Slack. Please try again.",
+      );
+
+      setSlackLoading(false);
+    }
+  };
+
+  const disconnectSlack = async () => {
+    const confirmed = window.confirm(
+      "Disconnect Slack? You will no longer receive hourly rate-limit notifications.",
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setSlackLoading(true);
+
+      await apiClient.post("/api/auth/slack/disconnect");
+
+      setSlackConnected(false);
+      setSlackTeamName(null);
+    } catch (error: any) {
+      console.error("Slack disconnect failed:", error);
+
+      alert(
+        error?.response?.data?.error ||
+          "Unable to disconnect Slack. Please try again.",
+      );
+    } finally {
+      setSlackLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -68,11 +139,31 @@ export default function DashboardPage() {
           </h1>
 
           <div className="flex items-center gap-4">
-            {slackConnectUrl && (
-              <a href={slackConnectUrl}>
-                <Button variant="secondary">Connect Slack</Button>
-              </a>
-            )}
+            {!slackLoading &&
+              (slackConnected ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-green-700">
+                    Slack
+                    {slackTeamName
+                      ? `: ${slackTeamName}`
+                      : " connected"}
+                  </span>
+
+                  <Button
+                    variant="secondary"
+                    onClick={disconnectSlack}
+                  >
+                    Disconnect
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  variant="secondary"
+                  onClick={connectSlack}
+                >
+                  Connect Slack
+                </Button>
+              ))}
 
             {session?.user?.image && (
               // eslint-disable-next-line @next/next/no-img-element
@@ -87,7 +178,10 @@ export default function DashboardPage() {
               <p className="font-medium text-gray-900">
                 {session?.user?.name}
               </p>
-              <p className="text-gray-500">{session?.user?.email}</p>
+
+              <p className="text-gray-500">
+                {session?.user?.email}
+              </p>
             </div>
 
             <Button
@@ -155,7 +249,9 @@ export default function DashboardPage() {
                 },
                 {
                   header: "Status",
-                  render: (r) => <StatusBadge status={r.status} />,
+                  render: (r) => (
+                    <StatusBadge status={r.status} />
+                  ),
                 },
               ]}
             />
@@ -180,7 +276,9 @@ export default function DashboardPage() {
                 },
                 {
                   header: "Status",
-                  render: (r) => <StatusBadge status={r.status} />,
+                  render: (r) => (
+                    <StatusBadge status={r.status} />
+                  ),
                 },
               ]}
             />
