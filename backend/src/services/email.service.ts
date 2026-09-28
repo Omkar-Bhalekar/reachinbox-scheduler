@@ -160,16 +160,27 @@ export class EmailService {
   }
 
   static async list(
-    userId: string,
-    status?: string,
-    page = 1,
-    limit = 25,
-  ) {
-    const where: any = { userId };
+  userId: string,
+  status?: string,
+  page = 1,
+  limit = 25,
+) {
+  const where: any = { userId };
 
-    if (status) {
-      where.status = status;
+  if (status) {
+    const statuses = status
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    if (statuses.length === 1) {
+      where.status = statuses[0];
+    } else if (statuses.length > 1) {
+      where.status = {
+        in: statuses,
+      };
     }
+  }
 
     const [items, total] = await Promise.all([
       prisma.email.findMany({
