@@ -1,7 +1,5 @@
 # ReachInbox Email Scheduler
 
-A full-stack email scheduling application built as a Software Development Intern assignment for ReachInbox.ai.
-
 The application allows users to authenticate, compose and schedule emails, upload recipient lists, control sending delays and hourly limits, monitor scheduled/sent emails, search email records, and receive Slack notifications when an hourly sending limit is reached.
 
 ---
