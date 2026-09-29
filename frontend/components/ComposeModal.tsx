@@ -24,6 +24,19 @@ interface Props {
   onScheduled?: () => void;
 }
 
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function parseRecipients(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/[\n,;]+/)
+        .map((email) => email.trim().toLowerCase())
+        .filter((email) => emailPattern.test(email)),
+    ),
+  );
+}
+
 export default function ComposeModal({
   isOpen,
   onClose,
@@ -34,8 +47,8 @@ export default function ComposeModal({
   const [body, setBody] = useState("");
 
   const [file, setFile] = useState<File | null>(null);
-  const [recipientCount, setRecipientCount] =
-    useState<number | null>(null);
+  const [csvRecipients, setCsvRecipients] = useState<string[]>([]);
+  const [manualRecipients, setManualRecipients] = useState("");
 
   const [startTime, setStartTime] = useState("");
   const [delaySeconds, setDelaySeconds] = useState("5");
@@ -46,13 +59,21 @@ export default function ComposeModal({
 
   const [showSchedule, setShowSchedule] = useState(true);
 
+  const recipients = Array.from(
+    new Set([
+      ...csvRecipients,
+      ...parseRecipients(manualRecipients),
+    ]),
+  );
+  const recipientCount = recipients.length;
+
   if (!isOpen) return null;
 
   const handleFile = (f: File | null) => {
     setFile(f);
 
     if (!f) {
-      setRecipientCount(null);
+      setCsvRecipients([]);
       return;
     }
 
@@ -61,14 +82,17 @@ export default function ComposeModal({
     Papa.parse(f, {
       header: true,
       complete: (results) => {
-        const count = (results.data as any[])
-          .map((row) => row.email)
-          .filter(Boolean).length;
-
-        setRecipientCount(count);
+        setCsvRecipients(
+          parseRecipients(
+            (results.data as any[])
+              .map((row) => row.email)
+              .filter(Boolean)
+              .join(','),
+          ),
+        );
       },
       error: () => {
-        setRecipientCount(null);
+        setCsvRecipients([]);
         setError("Unable to read the CSV file");
       },
     });
@@ -77,9 +101,9 @@ export default function ComposeModal({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!file) {
+    if (recipients.length === 0) {
       setError(
-        "Please upload a CSV file with an 'email' column",
+        "Enter at least one valid email address or upload a CSV file",
       );
       return;
     }
@@ -92,57 +116,29 @@ export default function ComposeModal({
     setError("");
     setSubmitting(true);
 
-    Papa.parse(file, {
-      header: true,
-
-      complete: async (results) => {
-        const recipients = (results.data as any[])
-          .map((row) => row.email)
-          .filter(Boolean);
-
-        if (recipients.length === 0) {
-          setError(
-            "No valid email addresses were found in the CSV file",
-          );
-          setSubmitting(false);
-          return;
-        }
-
-        try {
-          await apiClient.post(
-            "/api/emails/schedule",
-            {
-              senderEmail,
-              subject,
-              body,
-              recipients,
-              startTime: new Date(
-                startTime,
-              ).toISOString(),
-              delaySeconds:
-                parseInt(delaySeconds, 10) || 0,
-              hourlyLimit:
-                parseInt(hourlyLimit, 10) || undefined,
-            },
-          );
-
-          onScheduled?.();
-          onClose();
-        } catch (err: any) {
-          setError(
-            err?.response?.data?.error ||
-              "Failed to schedule emails",
-          );
-        } finally {
-          setSubmitting(false);
-        }
-      },
-
-      error: () => {
-        setError("Unable to read the CSV file");
+    void apiClient
+      .post("/api/emails/schedule", {
+        senderEmail,
+        subject,
+        body,
+        recipients,
+        startTime: new Date(startTime).toISOString(),
+        delaySeconds: parseInt(delaySeconds, 10) || 0,
+        hourlyLimit: parseInt(hourlyLimit, 10) || undefined,
+      })
+      .then(() => {
+        onScheduled?.();
+        onClose();
+      })
+      .catch((err: any) => {
+        setError(
+          err?.response?.data?.error ||
+            "Failed to schedule emails",
+        );
+      })
+      .finally(() => {
         setSubmitting(false);
-      },
-    });
+      });
   };
 
   return (
@@ -231,6 +227,21 @@ export default function ComposeModal({
                 </label>
 
                 <div className="min-w-0 flex-1">
+                  <textarea
+                    aria-label="Manual recipient email addresses"
+                    rows={3}
+                    placeholder="Enter email addresses separated by commas or new lines"
+                    value={manualRecipients}
+                    onChange={(e) =>
+                      setManualRecipients(e.target.value)
+                    }
+                    className="mb-3 block w-full resize-none rounded-xl border border-[#D7D7D7] bg-white px-4 py-3 text-sm leading-5 text-[#222222] outline-none transition placeholder:text-[#B5B5B5] focus:border-[#5C5CEB] focus:ring-2 focus:ring-[#5C5CEB]/10"
+                  />
+
+                  <p className="mb-2 text-xs text-[#999999]">
+                    Or import recipients from a CSV file.
+                  </p>
+
                   <label
                     htmlFor="recipient-csv"
                     className={`group flex min-h-[76px] cursor-pointer items-center gap-4 rounded-xl border border-dashed px-4 transition ${
@@ -277,7 +288,6 @@ export default function ComposeModal({
                       id="recipient-csv"
                       type="file"
                       accept=".csv"
-                      required
                       className="hidden"
                       onChange={(e) =>
                         handleFile(
@@ -287,7 +297,7 @@ export default function ComposeModal({
                     />
                   </label>
 
-                  {recipientCount !== null && (
+                  {recipientCount > 0 && (
                     <div className="mt-2.5 flex items-center justify-between rounded-lg bg-[#F2FCF6] px-3 py-2">
                       <div className="flex items-center gap-2">
                         <Users
@@ -498,7 +508,7 @@ export default function ComposeModal({
                 </p>
 
                 <p className="text-xs font-semibold text-[#444444]">
-                  {recipientCount !== null
+                  {recipientCount > 0
                     ? `${recipientCount} recipient${
                         recipientCount === 1
                           ? ""
