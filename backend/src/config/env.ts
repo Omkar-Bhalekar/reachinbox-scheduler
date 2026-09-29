@@ -6,6 +6,18 @@ function num(val: string | undefined, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function emailProvider(): 'ethereal' | 'resend' {
+  const configured = process.env.EMAIL_PROVIDER?.trim().toLowerCase();
+
+  if (configured === 'ethereal' || configured === 'resend') {
+    return configured;
+  }
+
+  // Railway sets RAILWAY_ENVIRONMENT for deployed services. Keep the
+  // zero-configuration local experience on Ethereal.
+  return process.env.RAILWAY_ENVIRONMENT ? 'resend' : 'ethereal';
+}
+
 export const config = {
   port: num(process.env.PORT, 4000),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -26,6 +38,13 @@ export const config = {
     auth: {
       user: process.env.ETHEREAL_USER || '',
       pass: process.env.ETHEREAL_PASS || '',
+    },
+  },
+  email: {
+    provider: emailProvider(),
+    resend: {
+      apiKey: process.env.RESEND_API_KEY || '',
+      fromEmail: process.env.RESEND_FROM_EMAIL || '',
     },
   },
   rateLimit: {

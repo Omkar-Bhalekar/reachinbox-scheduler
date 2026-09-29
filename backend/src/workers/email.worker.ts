@@ -55,6 +55,66 @@ function getTransporter() {
   return transporterPromise;
 }
 
+type ResendSendResponse = {
+  id?: string;
+  message?: string;
+  name?: string;
+};
+
+/**
+ * Send through Resend's HTTPS API. Railway blocks outbound SMTP on some
+ * plans, so production delivery intentionally does not depend on SMTP.
+ */
+async function sendWithResend({
+  senderEmail,
+  to,
+  subject,
+  body,
+}: {
+  senderEmail: string;
+  to: string;
+  subject: string;
+  body: string;
+}) {
+  const { apiKey, fromEmail } = config.email.resend;
+
+  if (!apiKey || !fromEmail) {
+    throw new Error(
+      'Resend requires RESEND_API_KEY and RESEND_FROM_EMAIL on Railway.',
+    );
+  }
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      // Resend requires this address/domain to be verified. The compose form
+      // sender remains the reply target and is still used for rate limits.
+      from: fromEmail,
+      reply_to: senderEmail,
+      to: [to],
+      subject,
+      text: body,
+      html: body,
+    }),
+  });
+
+  const result = (await response.json().catch(() => ({}))) as ResendSendResponse;
+
+  if (!response.ok) {
+    throw new Error(
+      `Resend API request failed (${response.status}): ${
+        result.message || result.name || 'Unknown error'
+      }`,
+    );
+  }
+
+  return result;
+}
+
 async function getHourlyLimit(
   senderEmail: string,
 ) {
@@ -300,11 +360,13 @@ export const emailWorker = new Worker(
      */
 
     try {
-      const transporter =
-        await getTransporter();
+      let previewUrl: string | undefined;
 
-      const info =
-        await transporter.sendMail({
+      if (config.email.provider === 'resend') {
+        await sendWithResend({ senderEmail, to, subject, body });
+      } else {
+        const transporter = await getTransporter();
+        const info = await transporter.sendMail({
           from: senderEmail,
           to,
           subject,
@@ -312,10 +374,8 @@ export const emailWorker = new Worker(
           html: body,
         });
 
-      const previewUrl =
-        nodemailer.getTestMessageUrl(
-          info,
-        );
+        previewUrl = nodemailer.getTestMessageUrl(info) || undefined;
+      }
 
       /*
        * SMTP send succeeded.
@@ -330,10 +390,7 @@ export const emailWorker = new Worker(
             status: 'SENT',
             sentAt: new Date(),
 
-            etherealPreviewUrl:
-              previewUrl
-                ? String(previewUrl)
-                : undefined,
+            etherealPreviewUrl: previewUrl,
           },
         });
 

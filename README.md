@@ -392,10 +392,20 @@ Start the frontend:
 ```bash
 npm run dev
 ```
+\Open `http://localhost:3000`.
 
-Open `http://localhost:3000`.
+### Email delivery
 
----
+Local development uses Ethereal by default. No setup is needed: if
+`ETHEREAL_USER`/`ETHEREAL_PASS` are blank, the worker auto-provisions a fresh
+Ethereal test account on first send and logs a preview URL.
+
+Railway uses Resend's HTTPS API (not SMTP) automatically when Railway supplies
+`RAILWAY_ENVIRONMENT`. Set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in the
+backend service. `RESEND_FROM_EMAIL` must be a sender address on a verified
+Resend domain. The address entered in the Compose form becomes `Reply-To`; the
+verified Resend address is the actual `From` address. Set `EMAIL_PROVIDER` to
+`ethereal` or `resend` to override automatic selection in any environment.---
 
 ## Google OAuth Configuration
 
